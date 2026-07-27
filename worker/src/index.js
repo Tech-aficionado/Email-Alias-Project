@@ -12,7 +12,8 @@ import { handleBlocklist } from './blocklist.js';
 import { handleAnalytics } from './analytics.js';
 import { handlePasswordReset } from './password-reset.js';
 import { handleWildcards } from './wildcards.js';
-import { handleDestinations } from './destinations.js';
+import { handleDestinations, handleDestinationVerification } from './destinations.js';
+import { syncCfDestinations, isCfRoutingConfigured } from './cf-destinations.js';
 import { handlePush } from './push.js';
 import { handleTwoFactor } from './two-factor.js';
 import { handleSecurity } from './security.js';
@@ -180,6 +181,16 @@ export default {
                     );
                 }
                 response = await handleDestinations(request, env, path);
+            } else if (path.startsWith('/api/destinations')) {
+                // Cloudflare destination-address verification status / re-send.
+                // Tighter limit than CRUD: each verify call sends real email.
+                if (!checkRateLimit(`destverify:${clientIP}`, 10, 60000)) {
+                    return Response.json(
+                        { error: 'Too many requests. Please slow down.' },
+                        { status: 429, headers: corsHeaders }
+                    );
+                }
+                response = await handleDestinationVerification(request, env, path);
             } else if (path.startsWith('/api/wildcards')) {
                 // Rate limit wildcard operations: 20 requests per 60 seconds per IP
                 if (!checkRateLimit(`wildcard:${clientIP}`, 20, 60000)) {
@@ -249,5 +260,21 @@ export default {
 
     async email(message, env) {
         await handleEmail(message, env);
+    },
+
+    /**
+     * Keeps the local cache of verified Cloudflare destination addresses fresh.
+     * Without this, an address verified (or deleted) outside the dashboard would
+     * stay stale and forwarding would silently fall back to the metered sender.
+     */
+    async scheduled(event, env, ctx) {
+        if (!isCfRoutingConfigured(env)) return;
+
+        try {
+            const result = await syncCfDestinations(env);
+            console.log(`Destination sync: ${result.verified}/${result.total} verified`);
+        } catch (error) {
+            console.error('Scheduled destination sync failed:', error.message || error);
+        }
     },
 };

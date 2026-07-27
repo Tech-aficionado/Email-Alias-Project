@@ -19,11 +19,31 @@ binding = "DB"
 database_name = "ghostrelay-db"
 database_id = "6c8d4b69-d312-4ffa-9186-475a999e9b6b"
 
+# Keeps the cached verification state of Cloudflare destination addresses fresh.
+# Without it, an address verified outside the dashboard stays stale and mail
+# needlessly falls back to the metered sender.
+[triggers]
+crons = ["0 */6 * * *"]
+
 # Secrets (set via: npx wrangler secret put <NAME>):
 #   JWT_SECRET       — token signing key
+#
+#   CLOUDFLARE_ACCOUNT_ID — your account ID (right sidebar of the dashboard)
+#   CLOUDFLARE_API_TOKEN  — token with "Account > Email Routing Addresses > Edit"
+#     Together these enable free, unmetered forwarding via message.forward().
+#     Sends to verified destination addresses are exempt from every Cloudflare
+#     quota and daily send limit. This is the primary delivery path.
+#
 #   RESEND_API_KEY   — from https://resend.com/api-keys
+#     Optional fallback, only used for destinations Cloudflare hasn't verified
+#     yet, plus transactional mail (password resets). Metered — free tier is
+#     100/day, 3,000/month, counted per recipient.
 #   RESEND_WEBHOOK_SECRET — from Resend webhook settings (for bounce verification)
+#
 #   ORG_FORWARD_TO   — (optional here) can also be set as a [vars] entry above
 #
 # Email routing (to receive emails):
 #   Cloudflare Dashboard → Domain → Email → Email Routing → Catch-all → Send to Worker
+#
+# Database migration required for the forwarding path:
+#   npx wrangler d1 execute ghostrelay-db --remote --file=database/migration-cf-destinations.sql

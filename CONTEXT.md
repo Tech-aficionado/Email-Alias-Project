@@ -270,13 +270,27 @@ Firebase Auth still runs behind the scenes — only the visible domain changes.
 
 ### Worker (wrangler.toml [vars] or secrets)
 
-| Variable        | Description                              | Type   |
-|-----------------|------------------------------------------|--------|
-| EMAIL_DOMAIN    | Domain for alias addresses               | var    |
-| ORG_FORWARD_TO  | Inbox that receives org emails (support@)| var    |
-| JWT_SECRET      | Token signing secret                     | secret |
-| RESEND_API_KEY  | Resend API key for outbound mail         | secret |
-| DB              | D1 database binding                      | binding|
+| Variable              | Description                                                  | Type   |
+|-----------------------|--------------------------------------------------------------|--------|
+| EMAIL_DOMAIN          | Domain for alias addresses                                   | var    |
+| ORG_FORWARD_TO        | Inbox that receives org emails (support@)                    | var    |
+| JWT_SECRET            | Token signing secret                                         | secret |
+| CLOUDFLARE_ACCOUNT_ID | Account ID — enables free native forwarding                  | secret |
+| CLOUDFLARE_API_TOKEN  | Token with Email Routing Addresses: Edit                     | secret |
+| RESEND_API_KEY        | Fallback sender for unverified destinations + password resets | secret |
+| DB                    | D1 database binding                                          | binding|
+
+### Mail delivery paths
+
+Alias mail is delivered by `message.forward()` — free, exempt from every
+Cloudflare quota and daily send limit, with SPF/DKIM alignment preserved via ARC.
+It only works for destination addresses verified on the Cloudflare account (cap:
+200 per account), which is why signup and adding a destination both register the
+inbox and trigger Cloudflare's verification email.
+
+`RESEND_API_KEY` is a fallback for destinations that aren't verified yet, and the
+sender for transactional mail (password resets). It is metered, so the goal is for
+almost no alias traffic to reach it. See `docs/SETUP-FORWARDING.md`.
 
 ---
 

@@ -1,12 +1,15 @@
 /**
  * Email forwarding handler
  * - Receives via Cloudflare Email Routing
- * - Forwards via Resend API with DKIM signing
+ * - Delivers primarily via `message.forward()` — free, unmetered, and Cloudflare
+ *   handles SPF/DKIM alignment and ARC sealing for the relay
+ * - Falls back to the Resend API for destinations Cloudflare has not verified
  * - Detects and records bounces
  * - Handles bounce notification emails (DSN)
  */
 
 import { isSenderBlocked } from './blocklist.js';
+import { partitionByVerification, isCfRoutingConfigured } from './cf-destinations.js';
 
 const MAX_EMAIL_SIZE = 256 * 1024; // 256KB max email body
 
@@ -45,11 +48,13 @@ const ORG_EMAILS = [
 ];
 
 export async function handleEmail(message, env) {
-    // Validate Resend API key exists
-    if (!env.RESEND_API_KEY) {
-        console.error('RESEND_API_KEY not configured');
-        message.setReject('Service misconfigured');
-        return;
+    // At least one delivery path must be available: Cloudflare native forwarding
+    // (preferred, free) or the Resend API (fallback for unverified destinations).
+    if (!isCfRoutingConfigured(env) && !env.RESEND_API_KEY) {
+        console.error('No delivery path configured — set CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID or RESEND_API_KEY');
+        // Temporary failure, not a reject: the sender should retry once we're fixed
+        // rather than receive a permanent bounce for our own misconfiguration.
+        throw new Error('No delivery path configured');
     }
 
     const recipientAddress = message.to.toLowerCase().trim();
@@ -107,109 +112,267 @@ export async function handleEmail(message, env) {
         return;
     }
 
-    // Read and parse email body (with size limit)
-    const rawBody = await readStream(message.raw, MAX_EMAIL_SIZE);
-    const { text: emailText, html: emailHtml } = extractBodyParts(rawBody);
-
-    // Sanitize sender name for the From header
-    const senderName = sanitizeHeaderValue(extractName(senderAddress));
-
-    // Forward via Resend with DKIM (Resend handles DKIM signing automatically
-    // when you verify your domain in their dashboard — SPF + DKIM + DMARC)
-    const domain = env.EMAIL_DOMAIN || 'ghostrelay.me';
-    const fromAddress = `${recipientAddress.split('@')[0]}@${domain}`;
-
-    // Determine all forwarding destinations
+    // Determine all forwarding destinations. Deduped because Cloudflare rejects
+    // a second forward of the same message to an address it already accepted.
     const destinations = await getForwardingDestinations(alias.id, alias.forward_to, env);
 
+    if (destinations.length === 0) {
+        message.setReject('No forwarding destination configured');
+        return;
+    }
+
+    const outcome = await deliver(message, env, {
+        destinations,
+        aliasId: alias.id,
+        recipientAddress,
+        senderAddress,
+        subject,
+    });
+
+    if (outcome.delivered.length === 0) {
+        // Transient failures (rate limits, 5xx, network errors) must surface as a
+        // temporary error so the sending MTA queues and retries. `setReject` issues
+        // a permanent SMTP refusal, which would bounce the mail and lose it — the
+        // wrong outcome for something as recoverable as an exhausted API quota.
+        if (outcome.transient) {
+            console.error(`Deferring mail for ${recipientAddress}: ${outcome.summary}`);
+            throw new Error(`Temporary delivery failure: ${outcome.summary}`);
+        }
+
+        console.error(`Permanent delivery failure for ${recipientAddress}: ${outcome.summary}`);
+        await recordBounce(env, alias.id, destinations[0], 'hard', outcome.summary,
+            senderAddress, subject);
+        message.setReject('Forwarding failed');
+        return;
+    }
+
+    if (outcome.failed.length > 0) {
+        // Some destinations landed, some did not. The message is not lost, so don't
+        // fail the SMTP transaction — just record it so the user can see the gap.
+        console.warn(`Partial delivery for ${recipientAddress}: ${outcome.summary}`);
+        for (const failure of outcome.failed) {
+            // Only genuine permanent rejections count as hard bounces — those are what
+            // auto-disable an alias. A missing verification or a rate limit must not.
+            const bounceType = (failure.transient || failure.configuration) ? 'soft' : 'hard';
+            await recordBounce(env, alias.id, failure.destination, bounceType,
+                failure.reason, senderAddress, subject);
+        }
+    }
+
+    await recordSuccessfulDelivery(env, alias, recipientAddress, senderAddress, subject);
+}
+
+// ===== Delivery =====
+
+/**
+ * Deliver a message to every destination, preferring Cloudflare's native
+ * forwarding.
+ *
+ * Two paths, in order:
+ *   1. `message.forward()` for destinations verified on the Cloudflare account.
+ *      Free, exempt from every quota and daily send limit, and Cloudflare keeps
+ *      SPF/DKIM alignment intact via ARC. This runs first, while `message.raw`
+ *      is still untouched.
+ *   2. The Resend API for anything left over. Costs quota, so it only covers
+ *      destinations the owner hasn't verified yet.
+ *
+ * @returns {Promise<{delivered: string[], failed: Array<{destination: string, reason: string, transient: boolean}>, transient: boolean, summary: string}>}
+ */
+async function deliver(message, env, ctx) {
+    const delivered = [];
+    const failed = [];
+
+    const { forwardable, unverified } = await partitionByVerification(env, ctx.destinations);
+
+    // Cloudflare marks some messages as non-forwardable (e.g. already-forwarded
+    // loops). Those have to go through the API path instead.
+    const canForward = message.canBeForwarded !== false;
+    const viaApi = [...unverified];
+
+    if (canForward) {
+        // Only X- prefixed headers survive forward(); everything else is stripped.
+        const extraHeaders = new Headers();
+        extraHeaders.set('X-GhostRelay-Alias-ID', ctx.aliasId);
+        extraHeaders.set('X-GhostRelay-Alias', ctx.recipientAddress);
+
+        for (const destination of forwardable) {
+            try {
+                await message.forward(destination, extraHeaders);
+                delivered.push(destination);
+            } catch (error) {
+                const reason = error?.message || String(error);
+
+                // Cloudflare treats a repeat forward to the same address as an
+                // error, but the recipient already has the mail.
+                if (/already forwarded/i.test(reason)) {
+                    delivered.push(destination);
+                    continue;
+                }
+
+                console.error(`forward() to ${destination} failed: ${reason}`);
+                // Retry through the API path — a verification that lapsed on
+                // Cloudflare's side shouldn't drop the message.
+                viaApi.push(destination);
+            }
+        }
+    } else {
+        viaApi.push(...forwardable);
+    }
+
+    if (viaApi.length > 0) {
+        if (env.RESEND_API_KEY) {
+            const apiResult = await deliverViaResend(message, env, ctx, viaApi);
+            delivered.push(...apiResult.delivered);
+            failed.push(...apiResult.failed);
+        } else {
+            for (const destination of viaApi) {
+                failed.push({
+                    destination,
+                    reason: 'Destination is not a verified Cloudflare address and no fallback sender is configured',
+                    // Treated as transient on purpose: the owner only has to click
+                    // Cloudflare's verification link. Deferring holds the mail in the
+                    // sender's queue during that window instead of bouncing it, and
+                    // keeps a config gap from counting as a dead mailbox.
+                    transient: true,
+                    configuration: true,
+                });
+            }
+        }
+    }
+
+    return {
+        delivered,
+        failed,
+        // Defer the whole message only if nothing got through for a recoverable reason.
+        transient: failed.some(f => f.transient),
+        summary: failed.map(f => `${f.destination}: ${f.reason}`).join(' | ')
+            || `delivered to ${delivered.length} destination(s)`,
+    };
+}
+
+/**
+ * Fallback sender for destinations Cloudflare will not forward to.
+ * Rebuilds the message as a new outbound email from the alias address, which is
+ * why it needs a verified sending domain (SPF + DKIM + DMARC) on the ESP side.
+ */
+async function deliverViaResend(message, env, ctx, destinations) {
+    const domain = env.EMAIL_DOMAIN || 'ghostrelay.me';
+    const fromAddress = `${ctx.recipientAddress.split('@')[0]}@${domain}`;
+    const senderName = sanitizeHeaderValue(extractName(ctx.senderAddress));
+
+    let emailText = '';
+    let emailHtml = '';
     try {
-        // Build forwarded email content
-        const forwardedHtml = emailHtml
-            ? buildHtmlWrapper(senderAddress, recipientAddress, emailHtml)
-            : buildHtml(senderAddress, recipientAddress, emailText);
-
-        const resendPayload = {
-            from: `${senderName} via GhostRelay <${fromAddress}>`,
-            to: destinations,
-            reply_to: senderAddress,
-            subject: subject,
-            html: forwardedHtml,
-            text: emailText || stripHtml(emailHtml || ''),
-            headers: {
-                // Custom headers for bounce tracking
-                'X-GhostRelay-Alias-ID': alias.id,
-                'X-GhostRelay-Original-From': senderAddress,
-                // List-Unsubscribe for better deliverability
-                'List-Unsubscribe': `<mailto:unsubscribe@${domain}?subject=unsubscribe-${alias.id}>`,
-            },
+        const rawBody = await readStream(message.raw, MAX_EMAIL_SIZE);
+        ({ text: emailText, html: emailHtml } = extractBodyParts(rawBody));
+    } catch (error) {
+        // `message.raw` can already be consumed once native forwarding has run.
+        // Treat it as transient so the sender retries rather than losing the mail.
+        const reason = `Could not read message body: ${error?.message || error}`;
+        console.error(reason);
+        return {
+            delivered: [],
+            failed: destinations.map(destination => ({ destination, reason, transient: true })),
         };
+    }
 
+    const forwardedHtml = emailHtml
+        ? buildHtmlWrapper(ctx.senderAddress, ctx.recipientAddress, emailHtml)
+        : buildHtml(ctx.senderAddress, ctx.recipientAddress, emailText);
+
+    try {
         const res = await fetch('https://api.resend.com/emails', {
             method: 'POST',
             headers: {
                 'Authorization': `Bearer ${env.RESEND_API_KEY}`,
                 'Content-Type': 'application/json',
             },
-            body: JSON.stringify(resendPayload),
+            body: JSON.stringify({
+                from: `${senderName} via GhostRelay <${fromAddress}>`,
+                to: destinations,
+                reply_to: ctx.senderAddress,
+                subject: ctx.subject,
+                html: forwardedHtml,
+                text: emailText || stripHtml(emailHtml || ''),
+                headers: {
+                    // Custom headers for bounce tracking
+                    'X-GhostRelay-Alias-ID': ctx.aliasId,
+                    'X-GhostRelay-Original-From': ctx.senderAddress,
+                    // List-Unsubscribe for better deliverability
+                    'List-Unsubscribe': `<mailto:unsubscribe@${domain}?subject=unsubscribe-${ctx.aliasId}>`,
+                },
+            }),
         });
 
-        if (!res.ok) {
-            const errBody = await res.text();
-            console.error(`Resend ${res.status}: ${errBody}`);
-
-            // Detect bounce-like failures from Resend API
-            if (res.status === 422 || res.status === 400) {
-                await recordBounce(env, alias.id, destinations[0], 'hard',
-                    `API rejection: ${errBody.substring(0, 200)}`,
-                    senderAddress, subject);
-            }
-
-            message.setReject('Forwarding failed');
-            return;
+        if (res.ok) {
+            return { delivered: [...destinations], failed: [] };
         }
 
-        // Parse Resend response for email ID (for webhook bounce tracking)
-        let resendResponse;
-        try {
-            resendResponse = await res.clone().json();
-        } catch { /* ignore */ }
+        const errBody = (await res.text()).substring(0, 300);
+        console.error(`Resend ${res.status}: ${errBody}`);
 
-        // Update stats
-        await env.DB.prepare(
-            'UPDATE aliases SET forwarded_count = forwarded_count + 1 WHERE id = ?'
-        ).bind(alias.id).run();
-
-        await env.DB.prepare(
-            'INSERT INTO email_logs (id, alias_id, sender, subject, forwarded_at) VALUES (?, ?, ?, ?, ?)'
-        ).bind(crypto.randomUUID(), alias.id, senderAddress, subject, new Date().toISOString()).run();
-
-        // Retain only the last 1000 logs per user to prevent unbounded growth
-        // Runs probabilistically (~10% of the time) to avoid overhead on every email
-        if (Math.random() < 0.1) {
-            try {
-                await env.DB.prepare(`
-                    DELETE FROM email_logs WHERE id IN (
-                        SELECT l.id FROM email_logs l
-                        JOIN aliases a ON l.alias_id = a.id
-                        WHERE a.user_id = ?
-                        ORDER BY l.forwarded_at DESC
-                        LIMIT -1 OFFSET 1000
-                    )
-                `).bind(alias.user_id).run();
-            } catch { /* non-critical — skip silently */ }
-        }
-
-        // Send push notifications to user
-        await sendPushNotification(env, alias.user_id, {
-            title: `New email via ${recipientAddress}`,
-            body: `From: ${senderAddress}\n${subject}`,
-            tag: alias.id,
-        });
-
+        return {
+            delivered: [],
+            failed: destinations.map(destination => ({
+                destination,
+                reason: `Resend ${res.status}: ${errBody}`,
+                transient: isTransientHttpStatus(res.status),
+            })),
+        };
     } catch (error) {
-        console.error('Forward failed:', error.message || error);
-        message.setReject('Forwarding failed');
+        // Network-level failure — always worth a retry.
+        const reason = `Resend request failed: ${error?.message || error}`;
+        console.error(reason);
+        return {
+            delivered: [],
+            failed: destinations.map(destination => ({ destination, reason, transient: true })),
+        };
     }
+}
+
+/**
+ * Whether an HTTP status from a sending provider is worth retrying.
+ * 429 (quota/rate limit) and 5xx are recoverable; 4xx rejections are not.
+ */
+function isTransientHttpStatus(status) {
+    return status === 408 || status === 429 || status >= 500;
+}
+
+/**
+ * Record a successful forward: bump counters, write the activity log, trim old
+ * logs, and notify the user's devices.
+ */
+async function recordSuccessfulDelivery(env, alias, recipientAddress, senderAddress, subject) {
+    await env.DB.prepare(
+        'UPDATE aliases SET forwarded_count = forwarded_count + 1 WHERE id = ?'
+    ).bind(alias.id).run();
+
+    await env.DB.prepare(
+        'INSERT INTO email_logs (id, alias_id, sender, subject, forwarded_at) VALUES (?, ?, ?, ?, ?)'
+    ).bind(crypto.randomUUID(), alias.id, senderAddress, subject, new Date().toISOString()).run();
+
+    // Retain only the last 1000 logs per user to prevent unbounded growth
+    // Runs probabilistically (~10% of the time) to avoid overhead on every email
+    if (Math.random() < 0.1) {
+        try {
+            await env.DB.prepare(`
+                DELETE FROM email_logs WHERE id IN (
+                    SELECT l.id FROM email_logs l
+                    JOIN aliases a ON l.alias_id = a.id
+                    WHERE a.user_id = ?
+                    ORDER BY l.forwarded_at DESC
+                    LIMIT -1 OFFSET 1000
+                )
+            `).bind(alias.user_id).run();
+        } catch { /* non-critical — skip silently */ }
+    }
+
+    // Send push notifications to user
+    await sendPushNotification(env, alias.user_id, {
+        title: `New email via ${recipientAddress}`,
+        body: `From: ${senderAddress}\n${subject}`,
+        tag: alias.id,
+    });
 }
 
 /**
@@ -222,6 +385,25 @@ async function forwardOrgEmail(message, env, recipientAddress, senderAddress, su
         console.error('ORG_FORWARD_TO not configured — cannot forward organization email');
         message.setReject('Service misconfigured');
         return;
+    }
+
+    // Native forwarding first. The admin inbox is under your control, so verify it
+    // once as a Cloudflare destination address and org mail costs nothing forever.
+    if (message.canBeForwarded !== false) {
+        try {
+            const extraHeaders = new Headers();
+            extraHeaders.set('X-GhostRelay-Org-Email', recipientAddress);
+            await message.forward(orgForwardTo, extraHeaders);
+            console.log(`Org email forwarded natively: ${recipientAddress} -> ${orgForwardTo}`);
+            return;
+        } catch (error) {
+            console.error(`Native org forward failed (${recipientAddress}): ${error?.message || error}`);
+            // Fall through to the API path below.
+        }
+    }
+
+    if (!env.RESEND_API_KEY) {
+        throw new Error(`Cannot forward org email to ${orgForwardTo}: address is not a verified Cloudflare destination and no fallback sender is configured`);
     }
 
     const rawBody = await readStream(message.raw, MAX_EMAIL_SIZE);
@@ -258,14 +440,22 @@ async function forwardOrgEmail(message, env, recipientAddress, senderAddress, su
         });
 
         if (!res.ok) {
-            const errBody = await res.text();
+            const errBody = (await res.text()).substring(0, 300);
             console.error(`Org email forward failed (${recipientAddress}): Resend ${res.status}: ${errBody}`);
+
+            // Quota and 5xx failures are recoverable — defer so the sender retries.
+            if (isTransientHttpStatus(res.status)) {
+                throw new Error(`Temporary org forward failure: Resend ${res.status}`);
+            }
+
             message.setReject('Forwarding failed');
             return;
         }
 
         console.log(`Org email forwarded: ${recipientAddress} from ${senderAddress} -> ${orgForwardTo}`);
     } catch (error) {
+        // Re-throw deferrals; only genuine permanent failures reject.
+        if (/^Temporary /.test(error?.message || '')) throw error;
         console.error('Org email forward error:', error.message || error);
         message.setReject('Forwarding failed');
     }
@@ -686,12 +876,16 @@ async function getForwardingDestinations(aliasId, defaultEmail, env) {
         'SELECT email FROM alias_destinations WHERE alias_id = ? AND active = 1'
     ).bind(aliasId).all();
 
-    if (results && results.length > 0) {
-        return results.map(r => r.email);
-    }
+    const emails = (results && results.length > 0)
+        ? results.map(r => r.email)
+        // Default: forward to user's primary email
+        : [defaultEmail];
 
-    // Default: forward to user's primary email
-    return [defaultEmail];
+    // Normalize and dedupe: `message.forward()` errors on a repeat delivery to the
+    // same address, and duplicates would otherwise burn extra ESP quota.
+    return [...new Set(
+        emails.filter(Boolean).map(e => String(e).trim().toLowerCase())
+    )];
 }
 
 // ===== Wildcard/Catch-All Matching =====
