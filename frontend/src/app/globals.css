@@ -31,6 +31,12 @@
   --relay-gradient-end: #06d6a0;
 }
 
+/* Product Hunt badge — swap light/dark artwork with the app theme */
+.ph-badge-light { display: block; }
+.ph-badge-dark { display: none; }
+.dark .ph-badge-light { display: none; }
+.dark .ph-badge-dark { display: block; }
+
 .dark {
   --relay-bg: #0a0e1a;
   --relay-surface: #12182b;

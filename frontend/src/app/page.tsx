@@ -1,6 +1,7 @@
 import Link from "next/link";
 import Navbar from "@/components/Navbar";
 import Footer from "@/components/Footer";
+import ProductHuntBadge from "@/components/ProductHuntBadge";
 
 const features = [
   {
@@ -133,7 +134,7 @@ export default function HomePage() {
           </p>
 
           {/* CTA Buttons */}
-          <div className="flex flex-col sm:flex-row items-center justify-center gap-3 sm:gap-4 mb-14 sm:mb-20 px-4 sm:px-0">
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-3 sm:gap-4 mb-8 sm:mb-10 px-4 sm:px-0">
             <Link
               href="/dashboard"
               className="w-full sm:w-auto inline-flex items-center justify-center gap-2 bg-[var(--relay-primary)] hover:bg-[var(--relay-primary-hover)] text-white font-semibold px-8 py-4 rounded-lg text-sm transition-smooth hover:-translate-y-0.5 btn-glow"
@@ -147,6 +148,11 @@ export default function HomePage() {
             >
               See How It Works
             </Link>
+          </div>
+
+          {/* Product Hunt */}
+          <div className="flex justify-center mb-14 sm:mb-20">
+            <ProductHuntBadge />
           </div>
 
           {/* Email demo visualization */}

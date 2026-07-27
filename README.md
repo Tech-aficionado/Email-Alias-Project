@@ -10,7 +10,7 @@ Protect your identity from spam, breaches, and data brokers — all on infrastru
 
 <br/>
 
-**[🌐 Live Demo](https://www.ghostrelay.me)** · **[🚀 Product Hunt](https://www.producthunt.com)** · **[📖 Docs](./CONTEXT.md)** · **[🤝 Contributing](./CONTRIBUTING.md)** · **[🐛 Report Bug](https://github.com/Tech-aficionado/GhostRelay---Open-Source/issues)**
+**[🌐 Live Demo](https://www.ghostrelay.me)** · **[🚀 Product Hunt](https://www.producthunt.com/products/ghostrelay)** · **[📖 Docs](./CONTEXT.md)** · **[🤝 Contributing](./CONTRIBUTING.md)** · **[🐛 Report Bug](https://github.com/Tech-aficionado/GhostRelay---Open-Source/issues)**
 
 <br/>
 
@@ -24,6 +24,10 @@ Protect your identity from spam, breaches, and data brokers — all on infrastru
 [![React](https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=black)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Tailwind CSS](https://img.shields.io/badge/Tailwind-v4-06B6D4?style=flat-square&logo=tailwindcss&logoColor=white)](https://tailwindcss.com/)
+
+<br/>
+
+<a href="https://www.producthunt.com/products/ghostrelay?embed=true&utm_source=badge-featured&utm_medium=badge&utm_campaign=badge-ghostrelay" target="_blank" rel="noopener noreferrer"><img src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1204807&theme=light&t=1785150460831" alt="GhostRelay - Free, self-hosted email aliasing. No server. No month bill. | Product Hunt" width="250" height="54" /></a>
 
 </div>
 

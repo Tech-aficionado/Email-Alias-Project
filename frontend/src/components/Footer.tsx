@@ -1,5 +1,6 @@
 import Link from "next/link";
 import Logo from "./Logo";
+import ProductHuntBadge from "./ProductHuntBadge";
 
 export default function Footer() {
   return (
@@ -15,6 +16,7 @@ export default function Footer() {
             <p className="text-[var(--relay-text-muted)] text-sm mt-4 leading-relaxed max-w-xs">
               Your real email stays invisible. Create aliases and take full control of your inbox privacy.
             </p>
+            <ProductHuntBadge width={215} className="mt-6" />
           </div>
 
           {/* Product */}
