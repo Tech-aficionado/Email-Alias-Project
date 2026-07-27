@@ -4,6 +4,8 @@
  * Supports token revocation and session management
  */
 
+import { ensureCfDestination, isCfRoutingConfigured } from './cf-destinations.js';
+
 const ACCESS_TOKEN_EXPIRY = 15 * 60 * 1000; // 15 minutes
 const REFRESH_TOKEN_EXPIRY = 30 * 24 * 60 * 60 * 1000; // 30 days
 const HASH_ITERATIONS = 100;
@@ -99,6 +101,21 @@ async function register({ email, password }, env, request) {
         'INSERT INTO users (id, email, password_hash, salt, created_at) VALUES (?, ?, ?, ?, ?)'
     ).bind(userId, email, passwordHash, salt, new Date().toISOString()).run();
 
+    // Register the signup inbox as a Cloudflare destination address so alias mail
+    // can be delivered by free native forwarding. Cloudflare sends a verification
+    // link; forwarding stays on the metered fallback sender until it's clicked.
+    // Best effort — never block account creation on this.
+    let destinationVerified = null;
+    if (isCfRoutingConfigured(env)) {
+        try {
+            const cf = await ensureCfDestination(env, email);
+            destinationVerified = cf.verified;
+        } catch (error) {
+            console.error(`Cloudflare destination registration failed for ${email}:`, error.message);
+            destinationVerified = false;
+        }
+    }
+
     // Create session with tokens
     const deviceName = parseUserAgent(request.headers.get('User-Agent') || '');
     const ipAddress = request.headers.get('CF-Connecting-IP') || 'unknown';
@@ -109,6 +126,10 @@ async function register({ email, password }, env, request) {
         token: accessToken,
         refreshToken,
         sessionId,
+        destinationVerified,
+        verificationMessage: destinationVerified === false
+            ? 'Check your inbox for a Cloudflare verification email — click the link to activate mail forwarding.'
+            : null,
     }, { status: 201 });
 }
 
