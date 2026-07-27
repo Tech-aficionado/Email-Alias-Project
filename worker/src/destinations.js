@@ -173,10 +173,21 @@ async function listDestinations(userId, aliasId, env) {
 
     // Verification state decides whether mail reaches this inbox via free native
     // forwarding or the metered fallback sender, so surface it in the list.
-    const allEmails = results.map(r => r.email);
-    if (user?.email) allEmails.push(user.email);
-    const states = await getCachedDestinationStates(env, allEmails);
+    // Skipped entirely when Cloudflare forwarding is off, so this endpoint keeps
+    // working on a deploy that lands before migration-cf-destinations.sql is applied.
     const cfEnabled = isCfRoutingConfigured(env);
+    let states = new Map();
+
+    if (cfEnabled) {
+        const allEmails = results.map(r => r.email);
+        if (user?.email) allEmails.push(user.email);
+        try {
+            states = await getCachedDestinationStates(env, allEmails);
+        } catch (error) {
+            // Missing table or transient D1 error — the list itself is still useful.
+            console.error('Could not read destination verification state:', error.message);
+        }
+    }
 
     return Response.json({
         destinations: results.map(row => ({
