@@ -78,7 +78,7 @@ single click — your real address is never exposed.
 1. **Sign up** with your real email (stored securely, never exposed to senders).
 2. **Generate an alias** like `a7x9k2m@ghostrelay.me` — or claim a custom one.
 3. **Use it anywhere** — signups, newsletters, shopping, sketchy downloads.
-4. **Mail forwards instantly** to your real inbox via Cloudflare + Resend.
+4. **Mail forwards instantly** to your real inbox via Cloudflare Email Routing.
 5. **Getting spam?** Toggle the alias off, set an expiry, or block the sender.
 
 ---
@@ -114,7 +114,8 @@ single click — your real address is never exposed.
 | Backend | Cloudflare Worker (ES modules) | Free tier |
 | Database | Cloudflare D1 (SQLite at the edge) | Free tier |
 | Email routing | Cloudflare Email Routing | Free |
-| Email sending | Resend (SPF · DKIM · DMARC) | Free tier |
+| Email forwarding | Cloudflare native `message.forward()` (ARC-sealed) | Free · unmetered |
+| Fallback sending | Resend (SPF · DKIM · DMARC) — unverified destinations only | Free tier |
 | Auth | HMAC access + refresh tokens · optional Firebase (Google) | — |
 | Domain | your `.me`/`.com` | ~$10/year |
 
@@ -189,7 +190,8 @@ Browser / Extension
 │  Cloudflare Worker    │◄── Email Routing (catch-all)
 │  - Auth (HMAC + 2FA)  │
 │  - Alias CRUD         │
-│  - Email forwarding   │──► Resend (SPF/DKIM/DMARC) ──► your inbox
+│  - Email forwarding   │──► message.forward() (free, ARC) ──► your inbox
+│                       │──► Resend fallback (unverified only) ──► your inbox
 │  - Webhooks / bounces │
 └─────────┬────────────┘
           │ D1 Binding

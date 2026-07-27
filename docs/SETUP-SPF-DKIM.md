@@ -4,7 +4,16 @@ This guide ensures forwarded emails from GhostRelay don't land in spam.
 
 ## How It Works
 
-GhostRelay forwards emails via [Resend](https://resend.com). When you verify your domain in Resend, they handle DKIM signing automatically. You just need to add the DNS records they provide.
+> **Note:** alias forwarding no longer goes through Resend by default. Cloudflare's
+> native `message.forward()` handles it for free and keeps SPF/DKIM alignment via
+> ARC, so no DNS work is needed for that path — see
+> [SETUP-FORWARDING.md](SETUP-FORWARDING.md).
+>
+> Follow this guide if you want the Resend fallback (for destinations Cloudflare
+> hasn't verified) and transactional mail like password resets to authenticate
+> properly.
+
+Resend signs mail for the fallback path. When you verify your domain in Resend, they handle DKIM signing automatically. You just need to add the DNS records they provide.
 
 ## Step 1: Add Domain to Resend
 
